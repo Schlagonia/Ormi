@@ -29,7 +29,7 @@ import '@tenderly/hardhat-tenderly';
 import 'solidity-coverage';
 import { fork } from 'child_process';
 
-const SKIP_LOAD = process.env.SKIP_LOAD === 'true';
+const SKIP_LOAD = false //process.env.SKIP_LOAD === 'true';
 const DEFAULT_BLOCK_GAS_LIMIT = 8000000;
 const DEFAULT_GAS_MUL = 5;
 const HARDFORK = 'istanbul';
@@ -61,12 +61,15 @@ const getCommonNetworkConfig = (networkName: eNetwork, networkId: number) => ({
   gasMultiplier: DEFAULT_GAS_MUL,
   gasPrice: NETWORKS_DEFAULT_GAS[networkName],
   chainId: networkId,
-  accounts: {
-    mnemonic: MNEMONIC,
-    path: MNEMONIC_PATH,
-    initialIndex: 0,
-    count: 20,
-  },
+  accounts: [`${MNEMONIC}`],
+    /*
+    accounts: {
+      mnemonic: MNEMONIC,
+      path: MNEMONIC_PATH,
+      initialIndex: 0,
+      count: 20,
+    },
+    */
 });
 
 let forkMode;

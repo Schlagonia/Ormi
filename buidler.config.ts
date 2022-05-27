@@ -6,6 +6,7 @@ import {accounts} from './test-wallets.js';
 import {eEthereumNetwork} from './helpers/types';
 import {BUIDLEREVM_CHAINID, COVERAGE_CHAINID} from './helpers/buidler-constants';
 import {setDRE} from './helpers/misc-utils';
+import { mnemonicToEntropy } from 'ethers/lib/utils';
 
 require('dotenv').config();
 
@@ -38,12 +39,15 @@ const getCommonNetworkConfig = (networkName: eEthereumNetwork, networkId: number
     blockGasLimit: DEFAULT_BLOCK_GAS_LIMIT,
     gasMultiplier: DEFAULT_GAS_PRICE,
     chainId: networkId,
+    accounts: [`${MNEMONIC}`],
+    /*
     accounts: {
       mnemonic: MNEMONIC,
       path: MNEMONIC_PATH,
       initialIndex: 0,
       count: 20,
     },
+    */
   };
 };
 

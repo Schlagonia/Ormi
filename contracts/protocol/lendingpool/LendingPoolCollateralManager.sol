@@ -102,7 +102,7 @@ contract LendingPoolCollateralManager is
 
     (vars.userStableDebt, vars.userVariableDebt) = Helpers.getUserCurrentDebt(user, debtReserve);
 
-    (vars.errorCode, vars.errorMsg) = ValidationLogic.validateLiquidationCall(
+    (vars.errorCode, vars.errorMsg) = ValidationLogic.validateLiquidationCall(  ////NEED TO UPDATE The logic here to account for underCollat
       collateralReserve,
       debtReserve,
       userConfig,
@@ -127,7 +127,7 @@ contract LendingPoolCollateralManager is
       ? vars.maxLiquidatableDebt
       : debtToCover;
 
-    (
+    (  ////*** Need to add a var for unsecured debt for CP to pay */
       vars.maxCollateralToLiquidate,
       vars.debtAmountNeeded
     ) = _calculateAvailableCollateralToLiquidate(
@@ -147,11 +147,13 @@ contract LendingPoolCollateralManager is
       vars.actualDebtToLiquidate = vars.debtAmountNeeded;
     }
 
+    ////*****Need to add logic to account for how much the coverage pool is responsible for covering
+
     // If the liquidator reclaims the underlying asset, we make sure there is enough available liquidity in the
     // collateral reserve
     if (!receiveAToken) {
       uint256 currentAvailableCollateral =
-        IERC20(collateralAsset).balanceOf(address(vars.collateralAtoken));
+        IERC20(collateralAsset).balanceOf(address(vars.collateralAtoken));  ////*** Probably dont want to add potential new liq fron CP to assure continued liquiditu in pool */
       if (currentAvailableCollateral < vars.maxCollateralToLiquidate) {
         return (
           uint256(Errors.CollateralManagerErrors.NOT_ENOUGH_LIQUIDITY),
@@ -187,7 +189,7 @@ contract LendingPoolCollateralManager is
       debtAsset,
       debtReserve.aTokenAddress,
       vars.actualDebtToLiquidate,
-      0
+      0     ////**** Need to change to how much is coming from Coverage pool if paying back debt */
     );
 
     if (receiveAToken) {
@@ -197,6 +199,9 @@ contract LendingPoolCollateralManager is
       if (vars.liquidatorPreviousATokenBalance == 0) {
         DataTypes.UserConfigurationMap storage liquidatorConfig = _usersConfig[msg.sender];
         liquidatorConfig.setUsingAsCollateral(collateralReserve.id, true);
+        if (liquidatorConfig.getHealthFactorLiquidationThreshold() == 0) {
+          liquidatorConfig.setHealthFactorLiquidationThreshold(1 ether);
+        }
         emit ReserveUsedAsCollateralEnabled(collateralAsset, msg.sender);
       }
     } else {
@@ -204,7 +209,7 @@ contract LendingPoolCollateralManager is
       collateralReserve.updateInterestRates(
         collateralAsset,
         address(vars.collateralAtoken),
-        0,
+        0,      ////**** Need to change to how much is coming from Coverage pool if paying back collat */
         vars.maxCollateralToLiquidate
       );
 
@@ -300,7 +305,7 @@ contract LendingPoolCollateralManager is
       .percentMul(vars.liquidationBonus)
       .div(vars.collateralPrice.mul(10**vars.debtAssetDecimals));
 
-    if (vars.maxAmountCollateralToLiquidate > userCollateralBalance) {
+    if (vars.maxAmountCollateralToLiquidate > userCollateralBalance) { //add a variable that accounts for the difference that CP wil pay
       collateralAmount = userCollateralBalance;
       debtAmountNeeded = vars
         .collateralPrice

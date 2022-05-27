@@ -121,7 +121,7 @@ export const CommonsConfig: ICommonConfiguration = {
     [eEthereumNetwork.hardhat]: undefined,
     [eEthereumNetwork.coverage]: undefined,
     [eEthereumNetwork.buidlerevm]: undefined,
-    [eEthereumNetwork.kovan]: undefined,
+    [eEthereumNetwork.kovan]: '0xbACe4786dc66623bc7506FF85Dc0a5E6466EB74D',
     [eEthereumNetwork.ropsten]: undefined,
     [eEthereumNetwork.main]: undefined,
     [eEthereumNetwork.tenderly]: undefined,
