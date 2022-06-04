@@ -36,9 +36,14 @@ contract LendingPoolCollateralManager is
   using WadRayMath for uint256;
   using PercentageMath for uint256;
 
+  //ideally should update address provider to be able to return the address
+  address coveragePoolAddress;
+
   uint256 internal constant LIQUIDATION_CLOSE_FACTOR_PERCENT = 5000;
 
   struct LiquidationCallLocalVars {
+    uint256 userEthCollateral;
+    uint256 userEthDebt;
     uint256 userCollateralBalance;
     uint256 userStableDebt;
     uint256 userVariableDebt;
@@ -49,6 +54,8 @@ contract LendingPoolCollateralManager is
     uint256 userStableRate;
     uint256 maxCollateralToLiquidate;
     uint256 debtAmountNeeded;
+    uint256 maxCoveragePoolLiability;
+    uint256 coveragePoolLiability;
     uint256 healthFactor;
     uint256 liquidatorPreviousATokenBalance;
     IAToken collateralAtoken;
@@ -88,10 +95,11 @@ contract LendingPoolCollateralManager is
     DataTypes.ReserveData storage collateralReserve = _reserves[collateralAsset];
     DataTypes.ReserveData storage debtReserve = _reserves[debtAsset];
     DataTypes.UserConfigurationMap storage userConfig = _usersConfig[user];
-
     LiquidationCallLocalVars memory vars;
+    vars.coveragePoolLiability = 0;
 
-    (, , , , vars.healthFactor) = GenericLogic.calculateUserAccountData(
+    uint256 ltv;
+    (vars.userEthCollateral, vars.userEthDebt, ltv, , vars.healthFactor) = GenericLogic.calculateUserAccountData(
       user,
       _reserves,
       userConfig,
@@ -102,7 +110,7 @@ contract LendingPoolCollateralManager is
 
     (vars.userStableDebt, vars.userVariableDebt) = Helpers.getUserCurrentDebt(user, debtReserve);
 
-    (vars.errorCode, vars.errorMsg) = ValidationLogic.validateLiquidationCall(  ////NEED TO UPDATE The logic here to account for underCollat
+    (vars.errorCode, vars.errorMsg) = ValidationLogic.validateLiquidationCall(
       collateralReserve,
       debtReserve,
       userConfig,
@@ -140,20 +148,46 @@ contract LendingPoolCollateralManager is
     );
 
     // If debtAmountNeeded < actualDebtToLiquidate, there isn't enough
-    // collateral to cover the actual amount that is being liquidated, hence we liquidate
-    // a smaller amount
+    // collateral to cover the actual amount that is being liquidated, hence we need to either
+    // liquidatea a smaller amount or the CP needs to pay part of the remainder
+    if(vars.debtAmountNeeded < vars.actualDebtToLiquidate) {
+      vars.maxCoveragePoolLiability = vars.actualDebtToLiquidate.sub(vars.debtAmountNeeded); //If undercollaterlized CP will pay the difference in debt
 
-    if (vars.debtAmountNeeded < vars.actualDebtToLiquidate) {
-      vars.actualDebtToLiquidate = vars.debtAmountNeeded;
+      ////****logic to account for how much the coverage pool is responsible for covering
+      uint256 userHealthFactor = userConfig.getHealthFactorLiquidationThreshold();
+      if(userHealthFactor < 1e18) {
+        //Means they could have underCollat loan. Need to figure if they do and how much to determin CP liability
+        uint256 allowedLtv = vars.userEthDebt.mul(ltv).div(ltv);
+        uint256 actualLtv = vars.userEthDebt.mul(1e18).div(vars.userEthCollateral);
+        bool isUnderCollateralized = allowedLtv > actualLtv;
+
+        if(isUnderCollateralized){ //May be better to make a variable that can test this in case ltv gets out of wack
+          uint256 diff;
+          //--need to adjust diff for price of debt token
+          vars.coveragePoolLiability = diff > vars.maxCoveragePoolLiability ? vars.maxCoveragePoolLiability : diff;
+          //--Need to determine how much we want to pay back since the users allowed health factor should increase
+        } else {
+          //User isnt auth for underCollat, we need to just liquidate less
+          vars.actualDebtToLiquidate = vars.debtAmountNeeded;
+        }
+      } else {
+        //User isnt auth for underCollat, we need to just liquidate less
+        vars.actualDebtToLiquidate = vars.debtAmountNeeded;
+      }
     }
 
-    ////*****Need to add logic to account for how much the coverage pool is responsible for covering
+    //Just in case the CP doesnt have enough we want to cover whatever we can
+    uint256 coveragePoolLiquidity = IERC20(debtAsset).balanceOf(coveragePoolAddress);
+    if(coveragePoolLiquidity < vars.coveragePoolLiability) {
+      vars.coveragePoolLiability = coveragePoolLiquidity;
+      vars.actualDebtToLiquidate = vars.debtAmountNeeded.add(coveragePoolLiquidity);
+    }
 
     // If the liquidator reclaims the underlying asset, we make sure there is enough available liquidity in the
     // collateral reserve
     if (!receiveAToken) {
       uint256 currentAvailableCollateral =
-        IERC20(collateralAsset).balanceOf(address(vars.collateralAtoken));  ////*** Probably dont want to add potential new liq fron CP to assure continued liquiditu in pool */
+        IERC20(collateralAsset).balanceOf(address(vars.collateralAtoken));
       if (currentAvailableCollateral < vars.maxCollateralToLiquidate) {
         return (
           uint256(Errors.CollateralManagerErrors.NOT_ENOUGH_LIQUIDITY),
@@ -189,7 +223,7 @@ contract LendingPoolCollateralManager is
       debtAsset,
       debtReserve.aTokenAddress,
       vars.actualDebtToLiquidate,
-      0     ////**** Need to change to how much is coming from Coverage pool if paying back debt */
+      0
     );
 
     if (receiveAToken) {
@@ -209,7 +243,7 @@ contract LendingPoolCollateralManager is
       collateralReserve.updateInterestRates(
         collateralAsset,
         address(vars.collateralAtoken),
-        0,      ////**** Need to change to how much is coming from Coverage pool if paying back collat */
+        0,
         vars.maxCollateralToLiquidate
       );
 
@@ -233,8 +267,17 @@ contract LendingPoolCollateralManager is
     IERC20(debtAsset).safeTransferFrom(
       msg.sender,
       debtReserve.aTokenAddress,
-      vars.actualDebtToLiquidate
+      vars.debtAmountNeeded
     );
+
+    //Transfer the amount CP is resposible for to Atoken address if applicable
+    if(vars.coveragePoolLiability > 0) {
+      IERC20(debtAsset).safeTransferFrom(
+        coveragePoolAddress,
+        debtReserve.aTokenAddress,
+        vars.coveragePoolLiability
+      );
+    }
 
     emit LiquidationCall(
       collateralAsset,
@@ -243,7 +286,8 @@ contract LendingPoolCollateralManager is
       vars.actualDebtToLiquidate,
       vars.maxCollateralToLiquidate,
       msg.sender,
-      receiveAToken
+      receiveAToken,
+      vars.coveragePoolLiability
     );
 
     return (uint256(Errors.CollateralManagerErrors.NO_ERROR), Errors.LPCM_NO_ERRORS);
@@ -305,7 +349,7 @@ contract LendingPoolCollateralManager is
       .percentMul(vars.liquidationBonus)
       .div(vars.collateralPrice.mul(10**vars.debtAssetDecimals));
 
-    if (vars.maxAmountCollateralToLiquidate > userCollateralBalance) { //add a variable that accounts for the difference that CP wil pay
+    if (vars.maxAmountCollateralToLiquidate > userCollateralBalance) {
       collateralAmount = userCollateralBalance;
       debtAmountNeeded = vars
         .collateralPrice
@@ -313,6 +357,7 @@ contract LendingPoolCollateralManager is
         .mul(10**vars.debtAssetDecimals)
         .div(vars.debtAssetPrice.mul(10**vars.collateralDecimals))
         .percentDiv(vars.liquidationBonus);
+
     } else {
       collateralAmount = vars.maxAmountCollateralToLiquidate;
       debtAmountNeeded = debtToCover;
