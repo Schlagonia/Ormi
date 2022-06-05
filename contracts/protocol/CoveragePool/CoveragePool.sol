@@ -1,4 +1,4 @@
-//SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-License-Identifier: agpl-3.0
 pragma solidity 0.6.12;
 
 import {SafeMath} from '../../dependencies/openzeppelin/contracts//SafeMath.sol';
@@ -6,7 +6,9 @@ import {IERC20} from '../../dependencies/openzeppelin/contracts//IERC20.sol';
 import {IERC20Detailed} from '../../dependencies/openzeppelin/contracts//IERC20Detailed.sol';
 import {Address} from '../../dependencies/openzeppelin/contracts/Address.sol';
 import {SafeERC20} from '../../dependencies/openzeppelin/contracts/SafeERC20.sol';
+import {ILendingPool} from '../../interfaces/ILendingPool.sol';
 import {ILendingPoolAddressesProvider} from '../../interfaces/ILendingPoolAddressesProvider.sol';
+import {DataTypes} from '../libraries/types/DataTypes.sol';
 import {Errors} from '../libraries/helpers/Errors.sol';
 
 //Needs To
@@ -19,7 +21,7 @@ contract CoveragePool {
     /* ======== DEPENDENCIES ======== */
 
     using SafeERC20 for IERC20;
-    using SafeMath for uint;
+    using SafeMath for uint256;
 
     /* ======== Modifiers ======== */
 
@@ -32,7 +34,7 @@ contract CoveragePool {
 
     IERC20 immutable ormiToken; // token paid for principal
 
-    ILendingPoolAddressesProvider public addressesProvider;
+    ILendingPoolAddressesProvider public immutable addressesProvider;
 
     mapping(address => bool) public bondContract;
 
@@ -40,7 +42,8 @@ contract CoveragePool {
 
     event BondInitialized(address bondContract, address principalToken);
     event BondContractToggled(address bondContract, bool approved);
-    event Withdraw(address token, address destination, uint amount);
+    event Withdraw(address token, address destination, uint256 amount);
+    event TokensDonated(IERC20 token, uint256 amount);
 
     /* ======== CONSTRUCTOR ======== */
 
@@ -70,10 +73,10 @@ contract CoveragePool {
     /**
      *  @notice deposit principle token and recieve back payout token
      *  @param _principleTokenAddress address
-     *  @param _amountPrincipleToken uint
-     *  @param _amountOrmiToken uint
+     *  @param _amountPrincipleToken uint256
+     *  @param _amountOrmiToken uint256
      */
-    function deposit(address _principleTokenAddress, uint _amountPrincipleToken, uint _amountOrmiToken) external {
+    function deposit(address _principleTokenAddress, uint256 _amountPrincipleToken, uint256 _amountOrmiToken) external {
         require(bondContract[msg.sender], "msg.sender is not a bond contract");
         IERC20(_principleTokenAddress).safeTransferFrom(msg.sender, address(this), _amountPrincipleToken);
         ormiToken.safeTransfer(msg.sender, _amountOrmiToken);
@@ -84,10 +87,10 @@ contract CoveragePool {
     /**
     *   @notice returns payout token valuation of priciple
     *   @param _principleTokenAddress address
-    *   @param _amount uint
-    *   @return value_ uint
+    *   @param _amount uint256
+    *   @return value_ uint256
      */
-    function valueOfToken( address _principleTokenAddress, uint _amount ) public view returns ( uint value_ ) {
+    function valueOfToken( address _principleTokenAddress, uint256 _amount ) public view returns ( uint256 value_ ) {
         // convert amount to match payout token decimals
         value_ = _amount.mul( 10 ** uint256(IERC20Detailed(address(ormiToken)).decimals()) ).div( 10 ** uint256(IERC20Detailed( _principleTokenAddress ).decimals()) );
     }
@@ -98,9 +101,24 @@ contract CoveragePool {
         @notice toggle bond contract
         @param _bondContract address
      */
-    function toggleBondContract(address _bondContract) external onlyPoolAdmin() {
+    function toggleBondContract(address _bondContract) external onlyPoolAdmin {
         bondContract[_bondContract] = !bondContract[_bondContract];
         emit BondContractToggled(_bondContract, bondContract[_bondContract]);
     }
+
+    //What else do we want the assets to do;
+/*
+    /// @notice To be called to manually donate an amount into the liquidity pool if needed
+    /// @param token The underlying token to deposit
+    /// @param _amount The amount to deposit into the pool
+    function donateToPool(IERC20 token, uint256 _amount) external onlyPoolAdmin{
+      require(token.balanceOf(address(this)) >= _amount, "Not enough underlying balance for transfer");
+      address aToken = ILendingPool(addressesProvider.getLendingPool()).getReserveData(address(token)).aTokenAddress;  <- Causes compiler error
+      //Donating tokens to the pool. Will not update the rates until the next deposit/withdraw call
+      token.safeTransfer(aToken, _amount);
+
+      emit TokensDonated(token, _amount);
+    }
+    */
 
 }

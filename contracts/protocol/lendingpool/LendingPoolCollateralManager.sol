@@ -38,6 +38,7 @@ contract LendingPoolCollateralManager is
 
   //ideally should update address provider to be able to return the address
   address coveragePoolAddress;
+  uint256 wad = uint256(1e18);
 
   uint256 internal constant LIQUIDATION_CLOSE_FACTOR_PERCENT = 5000;
 
@@ -54,9 +55,16 @@ contract LendingPoolCollateralManager is
     uint256 userStableRate;
     uint256 maxCollateralToLiquidate;
     uint256 debtAmountNeeded;
-    uint256 maxCoveragePoolLiability;
     uint256 coveragePoolLiability;
     uint256 healthFactor;
+    uint256 userHealthFactor;
+    uint256 ltv;
+    uint256 ccr;
+    uint256 collateralAllowed;
+    uint256 debtAssetPrice;
+    uint256 debtDecimals;
+    uint256 diff;
+    uint256 currentAvailableCollateral;
     uint256 liquidatorPreviousATokenBalance;
     IAToken collateralAtoken;
     bool isCollateralEnabled;
@@ -98,8 +106,7 @@ contract LendingPoolCollateralManager is
     LiquidationCallLocalVars memory vars;
     vars.coveragePoolLiability = 0;
 
-    uint256 ltv;
-    (vars.userEthCollateral, vars.userEthDebt, ltv, , vars.healthFactor) = GenericLogic.calculateUserAccountData(
+    (vars.userEthCollateral, vars.userEthDebt, vars.ltv, , vars.healthFactor) = GenericLogic.calculateUserAccountData(
       user,
       _reserves,
       userConfig,
@@ -135,9 +142,11 @@ contract LendingPoolCollateralManager is
       ? vars.maxLiquidatableDebt
       : debtToCover;
 
-    (  ////*** Need to add a var for unsecured debt for CP to pay */
+    (
       vars.maxCollateralToLiquidate,
-      vars.debtAmountNeeded
+      vars.debtAmountNeeded,
+      vars.debtAssetPrice,
+      vars.debtDecimals
     ) = _calculateAvailableCollateralToLiquidate(
       collateralReserve,
       debtReserve,
@@ -151,44 +160,47 @@ contract LendingPoolCollateralManager is
     // collateral to cover the actual amount that is being liquidated, hence we need to either
     // liquidatea a smaller amount or the CP needs to pay part of the remainder
     if(vars.debtAmountNeeded < vars.actualDebtToLiquidate) {
-      vars.maxCoveragePoolLiability = vars.actualDebtToLiquidate.sub(vars.debtAmountNeeded); //If undercollaterlized CP will pay the difference in debt
 
       ////****logic to account for how much the coverage pool is responsible for covering
-      uint256 userHealthFactor = userConfig.getHealthFactorLiquidationThreshold();
-      if(userHealthFactor < 1e18) {
-        //Means they could have underCollat loan. Need to figure if they do and how much to determin CP liability
-        uint256 allowedLtv = vars.userEthDebt.mul(ltv).div(ltv);
-        uint256 actualLtv = vars.userEthDebt.mul(1e18).div(vars.userEthCollateral);
-        bool isUnderCollateralized = allowedLtv > actualLtv;
+      vars.userHealthFactor = userConfig.getHealthFactorLiquidationThreshold();
 
-        if(isUnderCollateralized){ //May be better to make a variable that can test this in case ltv gets out of wack
-          uint256 diff;
-          //--need to adjust diff for price of debt token
-          vars.coveragePoolLiability = diff > vars.maxCoveragePoolLiability ? vars.maxCoveragePoolLiability : diff;
-          //--Need to determine how much we want to pay back since the users allowed health factor should increase
-        } else {
-          //User isnt auth for underCollat, we need to just liquidate less
-          vars.actualDebtToLiquidate = vars.debtAmountNeeded;
+      if(vars.userHealthFactor < wad) {
+        //Means they could have underCollat loan. Need to figure how much to determin CP liability
+
+        vars.coveragePoolLiability = vars.actualDebtToLiquidate.sub(vars.debtAmountNeeded); //If undercollaterlized CP will pay the difference in debt
+
+        // Calculate the normal collateral Coverage ratio based of user LTV // ((1 - LTV) / LTV) +1
+        vars.ccr = (wad.sub(vars.ltv)).mul(wad).div(vars.ltv).add(wad);
+        vars.collateralAllowed = vars.userEthDebt.mul(vars.ccr).div(wad);
+        vars.collateralAllowed = vars.collateralAllowed.mul(vars.userHealthFactor).div(wad);
+
+        vars.diff = vars.collateralAllowed.sub(vars.userEthCollateral);
+        //--need to adjust diff for price of debt // debtAmount * price / 10 ** (18 + (18 - debt decimals))
+        vars.diff = vars.diff.mul(vars.debtAssetPrice).div(10 ** (18 + (18 - vars.debtDecimals)));
+
+        vars.coveragePoolLiability = vars.diff > vars.coveragePoolLiability ? vars.coveragePoolLiability : vars.diff;
+        //--Need to determine if this how much we want to pay back since the users allowed health factor should increase
+
+        //Just in case the CP doesnt have enough we want to cover whatever we can
+        vars.currentAvailableCollateral = IERC20(debtAsset).balanceOf(coveragePoolAddress);
+        if(vars.currentAvailableCollateral < vars.coveragePoolLiability) {
+          vars.coveragePoolLiability = vars.currentAvailableCollateral;
+          vars.actualDebtToLiquidate = vars.debtAmountNeeded.add(vars.currentAvailableCollateral);
         }
+
       } else {
         //User isnt auth for underCollat, we need to just liquidate less
         vars.actualDebtToLiquidate = vars.debtAmountNeeded;
       }
     }
 
-    //Just in case the CP doesnt have enough we want to cover whatever we can
-    uint256 coveragePoolLiquidity = IERC20(debtAsset).balanceOf(coveragePoolAddress);
-    if(coveragePoolLiquidity < vars.coveragePoolLiability) {
-      vars.coveragePoolLiability = coveragePoolLiquidity;
-      vars.actualDebtToLiquidate = vars.debtAmountNeeded.add(coveragePoolLiquidity);
-    }
 
     // If the liquidator reclaims the underlying asset, we make sure there is enough available liquidity in the
     // collateral reserve
     if (!receiveAToken) {
-      uint256 currentAvailableCollateral =
+      vars.currentAvailableCollateral =  //Reusing variable to avoid stack to deep errors
         IERC20(collateralAsset).balanceOf(address(vars.collateralAtoken));
-      if (currentAvailableCollateral < vars.maxCollateralToLiquidate) {
+      if (vars.currentAvailableCollateral < vars.maxCollateralToLiquidate) {
         return (
           uint256(Errors.CollateralManagerErrors.NOT_ENOUGH_LIQUIDITY),
           Errors.LPCM_NOT_ENOUGH_LIQUIDITY_TO_LIQUIDATE
@@ -325,15 +337,15 @@ contract LendingPoolCollateralManager is
     address debtAsset,
     uint256 debtToCover,
     uint256 userCollateralBalance
-  ) internal view returns (uint256, uint256) {
+  ) internal view returns (uint256, uint256, uint256, uint256) {
     uint256 collateralAmount = 0;
     uint256 debtAmountNeeded = 0;
-    IPriceOracleGetter oracle = IPriceOracleGetter(_addressesProvider.getPriceOracle());
+    //IPriceOracleGetter oracle = IPriceOracleGetter(_addressesProvider.getPriceOracle());
 
     AvailableCollateralToLiquidateLocalVars memory vars;
 
-    vars.collateralPrice = oracle.getAssetPrice(collateralAsset);
-    vars.debtAssetPrice = oracle.getAssetPrice(debtAsset);
+    vars.collateralPrice = IPriceOracleGetter(_addressesProvider.getPriceOracle()).getAssetPrice(collateralAsset);
+    vars.debtAssetPrice = IPriceOracleGetter(_addressesProvider.getPriceOracle()).getAssetPrice(debtAsset);
 
     (, , vars.liquidationBonus, vars.collateralDecimals, ) = collateralReserve
       .configuration
@@ -362,6 +374,42 @@ contract LendingPoolCollateralManager is
       collateralAmount = vars.maxAmountCollateralToLiquidate;
       debtAmountNeeded = debtToCover;
     }
-    return (collateralAmount, debtAmountNeeded);
+    return (collateralAmount, debtAmountNeeded, vars.debtAssetPrice, vars.debtAssetDecimals);
   }
 }
+/*
+function _getCoveragePoolLiability(
+  uint256 actualDebtToLiquidate,
+  uint256 debtAmountNeeded,
+  address debtAsset,
+  uint256 ltv,
+  uint256 userEthCollateral,
+  uint256 userEthDebt,
+  uint256 userHealthFactor,
+  uint256 debtAssetPrice,
+  uint256 debtDecimals
+) internal view returns(uint256, uint256){
+  uint256 maxCoveragePoolLiability = actualDebtToLiquidate.sub(debtAmountNeeded); //If undercollaterlized CP will pay the difference in debt
+
+        // Calculate the normal collateral Coverage ratio based of user LTV // ((1 - LTV) / LTV) +1
+        uint256 ccr = (uint256(1e18).sub(ltv)).mul(1e18).div(ltv).add(1e18);
+        uint256 normalCollatarelNeeded = userEthDebt.mul(ccr).div(1e18);
+        uint256 userCollateralAllowed = normalCollatarelNeeded.mul(userHealthFactor).div(1e18);
+
+        uint256 diff = userCollateralAllowed.sub(userEthCollateral);
+        //--need to adjust diff for price of debt // debtAmount * price / 10 ** (18 + (18 - debt decimals))
+        uint256 diffInDebtPrice = diff.mul(debtAssetPrice).div(10 ** (18 + (18 - debtDecimals)));
+
+        uint256 coveragePoolLiability = diffInDebtPrice > maxCoveragePoolLiability ? maxCoveragePoolLiability : diffInDebtPrice;
+        //--Need to determine if this how much we want to pay back since the users allowed health factor should increase
+
+        //Just in case the CP doesnt have enough we want to cover whatever we can
+        uint256 coveragePoolLiquidity = IERC20(debtAsset).balanceOf(coveragePoolAddress);
+        if(coveragePoolLiquidity < coveragePoolLiability) {
+          coveragePoolLiability = coveragePoolLiquidity;
+          actualDebtToLiquidate = debtAmountNeeded.add(coveragePoolLiquidity);
+        }
+
+        return( actualDebtToLiqduidate, coveragePoolLiability);
+}
+*/
